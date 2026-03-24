@@ -3,10 +3,12 @@ from aiogram import Bot,Dispatcher,types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
+from aiohttp import web
 
 load_dotenv()
 TOKEN=os.getenv("BOT_TOKEN")
 BASE=os.getenv("SITE_BASE_URL","https://alpfederation.ru")
+PORT=int(os.getenv("PORT", 8080))  # Порт для Render
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger(__name__)
@@ -17,8 +19,21 @@ s=requests.Session()
 s.headers.update({"User-Agent":"Mozilla/5.0"})
 LR={}
 
+# HTTP-сервер для Render (health check)
+async def health_handler(request):
+    return web.json_response({"status": "ok", "bot": "running"})
+
+async def start_http_server():
+    app = web.Application()
+    app.router.add_get('/', health_handler)
+    app.router.add_get('/health', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    log.info(f"✅ HTTP сервер запущен на порту {PORT}")
+
 def get_file_ids(route_id):
-    """Запрашиваем файлы с правильного API эндпоинта"""
     url=f"{BASE}/api/mountainroutes/{route_id}"
     try:
         r=s.get(url,timeout=30)
@@ -39,7 +54,6 @@ def get_file_ids(route_id):
         return []
 
 def dl(fid):
-    """Скачиваем файл с /api/files/{ID}"""
     resp=s.get(f"{BASE}/api/files/{fid}",timeout=30)
     resp.raise_for_status()
     cd=resp.headers.get("Content-Disposition","")
@@ -60,7 +74,6 @@ async def on_msg(m):
     if not txt.startswith("http"):await m.answer("❌ Не ссылка");return
     if "alpfederation.ru" not in txt:await m.answer("❌ Только alpfederation.ru");return
     
-    # Извлекаем ID маршрута из URL (например, /mountainroute/1714/ → 1714)
     route_match=re.search(r'/(\d+)/?$',txt)
     if not route_match:
         await m.answer("❌ Не удалось найти ID маршрута");return
@@ -90,7 +103,9 @@ async def on_msg(m):
     await st.edit_text(f"✅ Готово! OK:{ok} Err:{err}")
 
 async def main():
-    log.info("🚀 Запуск...")
+    # Запускаем HTTP сервер для Render
+    await start_http_server()
+    log.info("🚀 Запуск бота...")
     await dp.start_polling(bot)
 
 if __name__=="__main__":
