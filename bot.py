@@ -58,28 +58,35 @@ def dl(fid):
     resp.raise_for_status()
     cd=resp.headers.get("Content-Disposition","")
     
-    # Пробуем разные способы получения имени файла
     nm = None
     
-    # Способ 1: filename* (RFC 5987) - с кодировкой UTF-8
-    m = re.search(r"filename\*\s*=\s*['\"]?[^'\"]*['\"]?([^;'\"]+)", cd, re.IGNORECASE)
+    # 1. Пробуем filename* (RFC 5987) - UTF-8 encoded
+    m = re.search(r"filename\*\s*=\s*UTF-8''([^;\s\"]+)", cd, re.IGNORECASE)
     if m:
-        try:
-            nm = requests.utils.unquote(m.group(1))
-        except:
-            pass
+        nm = requests.utils.unquote(m.group(1))
     
-    # Способ 2: обычное filename
+    # 2. Пробуем обычное filename в кавычках
     if not nm:
-        m = re.search(r'filename\s*=\s*"([^"]+)"', cd)
+        m = re.search(r'filename\s*=\s*"([^"]*)"', cd)
         if m:
-            nm = m.group(1)
-        else:
-            m = re.search(r"filename\s*=\s*([^;]+)", cd)
-            if m:
-                nm = m.group(1).strip()
+            raw = m.group(1)
+            # 🔑 КЛЮЧЕВОЙ МОМЕНТ: декодируем из latin1 в UTF-8
+            try:
+                nm = raw.encode('latin1').decode('utf-8')
+            except:
+                nm = raw
     
-    # Способ 3: запасной вариант
+    # 3. Пробуем filename без кавычек
+    if not nm:
+        m = re.search(r'filename\s*=\s*([^\s;]+)', cd)
+        if m:
+            raw = m.group(1).strip()
+            try:
+                nm = raw.encode('latin1').decode('utf-8')
+            except:
+                nm = raw
+    
+    # 4. Фоллбэк
     if not nm:
         nm = f"file_{fid}.pdf"
     
