@@ -57,9 +57,36 @@ def dl(fid):
     resp=s.get(f"{BASE}/api/files/{fid}",timeout=30)
     resp.raise_for_status()
     cd=resp.headers.get("Content-Disposition","")
-    m=re.search(r'filename\*?="?([^";\n]+)"?',cd)
-    nm=m.group(1).strip('"') if m else f"{fid}.pdf"
-    return resp.content,re.sub(r'[<>:"/\\|?*]','_',nm)
+    
+    # Пробуем разные способы получения имени файла
+    nm = None
+    
+    # Способ 1: filename* (RFC 5987) - с кодировкой UTF-8
+    m = re.search(r"filename\*\s*=\s*['\"]?[^'\"]*['\"]?([^;'\"]+)", cd, re.IGNORECASE)
+    if m:
+        try:
+            nm = requests.utils.unquote(m.group(1))
+        except:
+            pass
+    
+    # Способ 2: обычное filename
+    if not nm:
+        m = re.search(r'filename\s*=\s*"([^"]+)"', cd)
+        if m:
+            nm = m.group(1)
+        else:
+            m = re.search(r"filename\s*=\s*([^;]+)", cd)
+            if m:
+                nm = m.group(1).strip()
+    
+    # Способ 3: запасной вариант
+    if not nm:
+        nm = f"file_{fid}.pdf"
+    
+    # Очистка от опасных символов
+    nm = re.sub(r'[<>:"/\\|?*]', '_', nm)
+    
+    return resp.content, nm
 
 @dp.message(Command("start"))
 async def start(m):await m.answer("👋 Пришли ссылку на маршрут.")
