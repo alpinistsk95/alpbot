@@ -1,4 +1,4 @@
-import os,re,json,logging,time,requests
+import os,re,json,logging,time,requests,asyncio
 from aiogram import Bot,Dispatcher,types
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -8,7 +8,7 @@ from aiohttp import web
 load_dotenv()
 TOKEN=os.getenv("BOT_TOKEN")
 BASE=os.getenv("SITE_BASE_URL","https://alpfederation.ru")
-PORT=int(os.getenv("PORT", 8080))  # Порт для Render
+PORT=int(os.getenv("PORT", 8080))
 
 logging.basicConfig(level=logging.INFO)
 log=logging.getLogger(__name__)
@@ -19,7 +19,10 @@ s=requests.Session()
 s.headers.update({"User-Agent":"Mozilla/5.0"})
 LR={}
 
-# HTTP-сервер для Render (health check)
+# 🔒 WATCHDOG: время последнего сообщения
+LAST_UPDATE_TIME = time.time()
+MAX_IDLE_TIME = 300  # 5 минут без обновлений = перезагрузка
+
 async def health_handler(request):
     return web.json_response({"status": "ok", "bot": "running"})
 
@@ -54,29 +57,30 @@ def get_file_ids(route_id):
         return []
 
 def dl(fid):
+    """Скачивает файл с ПРАВИЛЬНОЙ обработкой кириллицы в имени"""
     resp=s.get(f"{BASE}/api/files/{fid}",timeout=30)
     resp.raise_for_status()
     cd=resp.headers.get("Content-Disposition","")
     
     nm = None
     
-    # 1. Пробуем filename* (RFC 5987) - UTF-8 encoded
+    # 🔑 Способ 1: filename* (RFC 5987) - UTF-8 encoded
     m = re.search(r"filename\*\s*=\s*UTF-8''([^;\s\"]+)", cd, re.IGNORECASE)
     if m:
         nm = requests.utils.unquote(m.group(1))
     
-    # 2. Пробуем обычное filename в кавычках
+    # 🔑 Способ 2: обычное filename в кавычках (с декодированием кириллицы)
     if not nm:
         m = re.search(r'filename\s*=\s*"([^"]*)"', cd)
         if m:
             raw = m.group(1)
-            # 🔑 КЛЮЧЕВОЙ МОМЕНТ: декодируем из latin1 в UTF-8
+            # КЛЮЧЕВОЙ МОМЕНТ: декодируем из latin1 в UTF-8
             try:
                 nm = raw.encode('latin1').decode('utf-8')
             except:
                 nm = raw
     
-    # 3. Пробуем filename без кавычек
+    # 🔑 Способ 3: filename без кавычек
     if not nm:
         m = re.search(r'filename\s*=\s*([^\s;]+)', cd)
         if m:
@@ -86,7 +90,7 @@ def dl(fid):
             except:
                 nm = raw
     
-    # 4. Фоллбэк
+    # Фоллбэк
     if not nm:
         nm = f"file_{fid}.pdf"
     
@@ -96,17 +100,23 @@ def dl(fid):
     return resp.content, nm
 
 @dp.message(Command("start"))
-async def start(m):await m.answer("👋 Пришли ссылку на маршрут.")
+async def start(m):
+    await m.answer("👋 Пришли ссылку на маршрут.")
 
 @dp.message()
 async def on_msg(m):
+    global LAST_UPDATE_TIME
+    LAST_UPDATE_TIME = time.time()  # 🔒 Сбрасываем таймер watchdog
+    
     uid=str(m.from_user.id);txt=m.text.strip()
     now=time.time()
     if uid in LR and now-LR[uid]<10:
         await m.answer("⏳ 10 сек пауза");return
     LR[uid]=now
-    if not txt.startswith("http"):await m.answer("❌ Не ссылка");return
-    if "alpfederation.ru" not in txt:await m.answer("❌ Только alpfederation.ru");return
+    if not txt.startswith("http"):
+        await m.answer("❌ Не ссылка");return
+    if "alpfederation.ru" not in txt:
+        await m.answer("❌ Только alpfederation.ru");return
     
     route_match=re.search(r'/(\d+)/?$',txt)
     if not route_match:
@@ -136,11 +146,19 @@ async def on_msg(m):
             await m.answer(f"❌ {e}");err+=1
     await st.edit_text(f"✅ Готово! OK:{ok} Err:{err}")
 
+# 🔒 WATCHDOG: проверка на зависание
+async def check_health():
+    while True:
+        await asyncio.sleep(60)
+        if time.time() - LAST_UPDATE_TIME > MAX_IDLE_TIME:
+            log.warning("⚠️ Бот не получает обновления 5 мин! Перезапуск...")
+            os._exit(1)
+
 async def main():
-    # Запускаем HTTP сервер для Render
     await start_http_server()
+    asyncio.create_task(check_health())  # 🔒 Запускаем сторожа
     log.info("🚀 Запуск бота...")
     await dp.start_polling(bot)
 
 if __name__=="__main__":
-    import asyncio;asyncio.run(main())
+    asyncio.run(main())
