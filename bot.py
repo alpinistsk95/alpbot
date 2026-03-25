@@ -19,9 +19,9 @@ s=requests.Session()
 s.headers.update({"User-Agent":"Mozilla/5.0"})
 LR={}
 
-# 🔒 WATCHDOG: время последнего сообщения
+# 🔒 WATCHDOG: увеличил с 5 до 15 минут
 LAST_UPDATE_TIME = time.time()
-MAX_IDLE_TIME = 300  # 5 минут без обновлений = перезагрузка
+MAX_IDLE_TIME = 900  # 15 минут
 
 async def health_handler(request):
     return web.json_response({"status": "ok", "bot": "running"})
@@ -57,30 +57,24 @@ def get_file_ids(route_id):
         return []
 
 def dl(fid):
-    """Скачивает файл с ПРАВИЛЬНОЙ обработкой кириллицы в имени"""
     resp=s.get(f"{BASE}/api/files/{fid}",timeout=30)
     resp.raise_for_status()
     cd=resp.headers.get("Content-Disposition","")
-    
     nm = None
     
-    # 🔑 Способ 1: filename* (RFC 5987) - UTF-8 encoded
     m = re.search(r"filename\*\s*=\s*UTF-8''([^;\s\"]+)", cd, re.IGNORECASE)
     if m:
         nm = requests.utils.unquote(m.group(1))
     
-    # 🔑 Способ 2: обычное filename в кавычках (с декодированием кириллицы)
     if not nm:
         m = re.search(r'filename\s*=\s*"([^"]*)"', cd)
         if m:
             raw = m.group(1)
-            # КЛЮЧЕВОЙ МОМЕНТ: декодируем из latin1 в UTF-8
             try:
                 nm = raw.encode('latin1').decode('utf-8')
             except:
                 nm = raw
     
-    # 🔑 Способ 3: filename без кавычек
     if not nm:
         m = re.search(r'filename\s*=\s*([^\s;]+)', cd)
         if m:
@@ -90,13 +84,10 @@ def dl(fid):
             except:
                 nm = raw
     
-    # Фоллбэк
     if not nm:
         nm = f"file_{fid}.pdf"
     
-    # Очистка от опасных символов
     nm = re.sub(r'[<>:"/\\|?*]', '_', nm)
-    
     return resp.content, nm
 
 @dp.message(Command("start"))
@@ -106,7 +97,7 @@ async def start(m):
 @dp.message()
 async def on_msg(m):
     global LAST_UPDATE_TIME
-    LAST_UPDATE_TIME = time.time()  # 🔒 Сбрасываем таймер watchdog
+    LAST_UPDATE_TIME = time.time()
     
     uid=str(m.from_user.id);txt=m.text.strip()
     now=time.time()
@@ -146,17 +137,35 @@ async def on_msg(m):
             await m.answer(f"❌ {e}");err+=1
     await st.edit_text(f"✅ Готово! OK:{ok} Err:{err}")
 
-# 🔒 WATCHDOG: проверка на зависание
+# 🔒 WATCHDOG: увеличил таймаут
 async def check_health():
     while True:
         await asyncio.sleep(60)
         if time.time() - LAST_UPDATE_TIME > MAX_IDLE_TIME:
-            log.warning("⚠️ Бот не получает обновления 5 мин! Перезапуск...")
+            log.warning("⚠️ Бот не получает обновления 15 мин! Перезапуск...")
             os._exit(1)
+
+# 🔒 Обработчик ошибок (включая Conflict)
+@dp.errors()
+async def errors_handler(update: types.Update, exception: Exception):
+    if "Conflict" in str(exception):
+        log.warning("⚠️ Conflict detected! Waiting 30 sec...")
+        await asyncio.sleep(30)
+        os._exit(1)
+    log.error(f"Error: {exception}")
+    raise exception
 
 async def main():
     await start_http_server()
-    asyncio.create_task(check_health())  # 🔒 Запускаем сторожа
+    
+    # 🔒 Сброс старых соединений перед запуском
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await bot.session.close()
+    except:
+        pass
+    
+    asyncio.create_task(check_health())
     log.info("🚀 Запуск бота...")
     await dp.start_polling(bot)
 
